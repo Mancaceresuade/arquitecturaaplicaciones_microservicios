@@ -43,6 +43,9 @@
         <module>api-gateway</module>
         <module>inventory-service</module>
         <module>notification-service</module>
+        <module>proveedor-service</module>
+        <module>exam-proveedor-rabbit-integration-tests</module>
+        <module>exam-proveedor-kafka-integration-tests</module>
     </modules>
 
     <build>

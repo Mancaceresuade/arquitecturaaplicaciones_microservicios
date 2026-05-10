@@ -23,6 +23,12 @@ spring:
             - Path=/api/inventory/**
           filters:
             - AuthorizationHeader
+        - id: proveedor-service
+          uri: lb://proveedor-service
+          predicates:
+            - Path=/api/proveedores/**
+          filters:
+            - AuthorizationHeader
 
 eureka:
   instance:

@@ -1,0 +1,489 @@
+# Prueba pedagógica mínima: Apache Kafka + carga con k6
+
+**Contexto:** ecosistema Spring Cloud (Config, Eureka, Auth, Inventory, Gateway) con publicación del evento de **producto creado** hacia Apache Kafka (topic `product-created`, grupo de consumo `notification-group`) y consumo en `notification-service`.
+
+**Objetivo:** que quien ejecuta la práctica pueda (1) levantar el **camino mínimo** con mensajería Kafka, (2) **verificar** el flujo con un request manual, (3) **simular muchos usuarios** con k6 y (4) **relacionar** métricas HTTP con el estado del topic en Kafka.
+
+> **Diferencia clave respecto a RabbitMQ:** Kafka no elimina los mensajes al consumirlos. Los almacena en un log inmutable con retención configurable (por defecto 7 días). El consumidor avanza su propio `offset`; si el `notification-service` se reinicia, vuelve a consumir desde donde quedó (o desde el principio si usa `auto.offset.reset=earliest`).
+
+---
+
+## 1. Qué vas a demostrar
+
+- Tráfico HTTP concurrente al **API Gateway** al crear productos.
+- El **inventory-service** persiste y **publica** un evento al topic `product-created` via `KafkaTemplate`.
+- El **notification-service** **consume** con `@KafkaListener` y deja evidencia en logs.
+- Bajo carga, conviene preguntarse: ¿qué satura primero? (JVM/gateway/inventario/BD vs lag de consumer group en Kafka).
+
+---
+
+## 2. Prerrequisitos
+
+- Repo clonado; **Java 21** y **Maven 3.8+**.
+- **Apache Kafka** accesible en **9092** (modo KRaft, sin Zookeeper).
+- **[k6](https://k6.io/docs/get-started/installation/)** instalado para la parte de carga.
+- Terminal(es) para correr varios `mvn spring-boot:run` **o** el método que uses en Codespaces.
+
+> **Codespaces:** los servicios suelen escuchar en `localhost` dentro del entorno. k6 puede ejecutarse **en la misma máquina/Codespace** pegándole a `http://localhost:8080`. Si querés cargar desde **fuera**, necesitás una URL pública del puerto reenviado y permisos de acceso.
+
+### 2.1 Instalar Apache Kafka
+
+El método más simple en cualquier sistema operativo es **Docker**. La instalación nativa requiere descargar el binario y configurar KRaft manualmente (se detalla en la subsección correspondiente).
+
+#### Docker (Windows, macOS, Linux, GitHub Codespaces) — opción recomendada
+
+El proyecto ya usa la imagen **Bitnami Kafka** en modo KRaft. Para levantar Kafka localmente de forma aislada, el comando equivalente es:
+
+```bash
+docker run -d --name kafka \
+  -p 9092:9092 \
+  -e KAFKA_CFG_NODE_ID=1 \
+  -e KAFKA_CFG_PROCESS_ROLES=broker,controller \
+  -e KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+  -e KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+  -e KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+  -e KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+  -e KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true \
+  bitnami/kafka:latest
+```
+
+> **⚠️ Atención `ADVERTISED_LISTENERS`:** cuando los microservicios corren fuera de Docker (ejecución manual con `mvn spring-boot:run`), el valor debe ser `PLAINTEXT://localhost:9092`. En el `docker-compose.yml` del proyecto el valor es `PLAINTEXT://kafka:9092` porque allí los contenedores se ven por nombre de servicio — esa configuración **no sirve** para el arranque manual.
+
+Verificar que Kafka levantó:
+
+```bash
+docker logs kafka --tail 20
+# Buscar: "KafkaServer id=1" y "started (kafka.server.KafkaServer)"
+```
+
+#### Windows — instalación nativa
+
+Kafka no tiene instalador `.exe` oficial ni paquete Chocolatey mantenido. La opción nativa requiere:
+
+1. Tener **Java 21** instalado y `JAVA_HOME` configurado.
+2. Descargar el binario desde https://kafka.apache.org/downloads (elegir la versión **Scala 2.13 – Binary**).
+3. Extraer en una ruta sin espacios, por ejemplo `C:\kafka`.
+4. Configurar KRaft (sin Zookeeper):
+
+   ```powershell
+   # Generar un UUID de cluster (una sola vez)
+   cd C:\kafka
+   cd bin
+   cd windows
+   .\kafka-storage.bat random-uuid
+   # Copiar el UUID que imprime, por ejemplo: abc123XYZ
+
+   # Formatear el almacenamiento con ese UUID
+   bin\windows\kafka-storage.bat format -t abc123XYZ -c config\kraft\server.properties
+   ```
+
+5. Editar `config\kraft\server.properties` y verificar / ajustar:
+
+   ```properties
+   listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+   advertised.listeners=PLAINTEXT://localhost:9092
+   auto.create.topics.enable=true
+   ```
+
+6. Iniciar el broker:
+
+   ```powershell
+   bin\windows\kafka-server-start.bat config\server.properties
+   ```
+
+> En Windows los scripts están en `bin\windows\` con extensión `.bat`. En macOS/Linux están en `bin\` sin extensión.
+
+#### macOS (Homebrew)
+
+```bash
+brew install kafka
+# Kafka instalado en KRaft por defecto desde versiones recientes de Homebrew
+
+# Formatear el almacenamiento (primera vez):
+KAFKA_UUID=$(kafka-storage random-uuid)
+kafka-storage format -t $KAFKA_UUID -c /opt/homebrew/etc/kafka/kraft/server.properties
+
+# Iniciar:
+brew services start kafka
+```
+
+Verificar: `kafka-topics --bootstrap-server localhost:9092 --list`
+
+#### Linux (Debian / Ubuntu)
+
+El paquete en apt suele ser muy viejo. Lo más práctico es Docker o la descarga del binario oficial:
+
+```bash
+# Descarga (ajustar versión según lo disponible en kafka.apache.org/downloads)
+wget https://downloads.apache.org/kafka/3.9.0/kafka_2.13-3.9.0.tgz
+tar -xzf kafka_2.13-3.9.0.tgz
+cd kafka_2.13-3.9.0
+
+# Formatear y arrancar en KRaft
+KAFKA_UUID=$(bin/kafka-storage.sh random-uuid)
+bin/kafka-storage.sh format -t $KAFKA_UUID -c config/kraft/server.properties
+bin/kafka-server-start.sh config/kraft/server.properties
+```
+
+#### Verificación común
+
+```bash
+# Listar topics (vacío al principio está bien)
+kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# O desde Docker:
+docker exec kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+Si el comando responde sin error (aunque devuelva vacío), Kafka está listo.
+
+### 2.2 No hay UI de gestión nativa
+
+A diferencia de RabbitMQ, Kafka **no incluye** una interfaz web por defecto. Las opciones son:
+
+- **CLI** (`kafka-topics.sh`, `kafka-consumer-groups.sh`): disponibles en el binario y en el contenedor Docker.
+- **kafka-ui** (opcional, open source): imagen `provectuslabs/kafka-ui`. No es necesaria para la práctica, pero es útil para visualizar topics y offsets.
+
+```bash
+# kafka-ui opcional
+docker run -d --name kafka-ui -p 8090:8080 \
+  -e KAFKA_CLUSTERS_0_NAME=local \
+  -e KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=host.docker.internal:9092 \
+  provectuslabs/kafka-ui:latest
+# Abrir: http://localhost:8090
+```
+
+> En Linux reemplazá `host.docker.internal` por la IP del host o `172.17.0.1`.
+
+---
+
+## 3. Arranque manual (orden sugerido)
+
+### 3.1 Broker Kafka (antes que los microservicios)
+
+Asegurate de que Kafka esté corriendo y de que `kafka-topics.sh --bootstrap-server localhost:9092 --list` responda sin error. El topic `product-created` se crea automáticamente cuando el `inventory-service` publica el primer evento (gracias a `auto.create.topics.enable=true`).
+
+### 3.2 Microservicios
+
+Levantá en **terminales separadas**, **en este orden**:
+
+1. **config-server** (perfil `native` obligatorio):
+
+   ```bash
+   cd config-server
+   mvn spring-boot:run -Dspring-boot.run.profiles=native
+   ```
+
+   Verificar: http://localhost:8888/actuator/health
+
+2. **eureka-server**:
+
+   ```bash
+   cd eureka-server
+   mvn spring-boot:run
+   ```
+
+   Verificar: http://localhost:8761
+
+3. **auth-service**:
+
+   ```bash
+   cd auth-service
+   mvn spring-boot:run
+   ```
+
+   Verificar registro en Eureka: http://localhost:8761
+
+4. **inventory-service** con perfil **kafka** (publica al broker):
+
+   ```bash
+   cd inventory-service
+   mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+   ```
+
+5. **notification-service** con perfil **kafka** (consume y escribe logs):
+
+   ```bash
+   cd notification-service
+   mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+   ```
+
+6. **api-gateway** (entrada HTTP; conviene **después** de que Auth e Inventory figuren en Eureka):
+
+   ```bash
+   cd api-gateway
+   mvn spring-boot:run
+   ```
+
+   Verificar: http://localhost:8080/actuator/health
+
+**Puertos de referencia:** Config 8888, Eureka 8761, Gateway 8080, Auth 8083, Inventory 8082, Notification 8084, Kafka 9092.
+
+> **Importante:** sin `-Dspring-boot.run.profiles=kafka` en inventory y notification, el proyecto no activará el `KafkaPublisherAdapter` ni el `KafkaProductEventListener`. Verificá en los logs de arranque que Spring informa `The following 1 profile is active: "kafka"`.
+
+---
+
+## 4. Verificación manual del flujo
+
+### 4.1 Salud rápida
+
+```bash
+curl -s http://localhost:8761/eureka/apps
+curl -s http://localhost:8080/actuator/health
+curl -s http://localhost:8084/actuator/health
+```
+
+### 4.2 Login y creación de producto vía Gateway
+
+En **Git Bash / WSL / macOS / Linux** (con `jq` instalado):
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | jq -r '.token')
+
+curl -s -X POST http://localhost:8080/api/inventory/products \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Producto Demo Kafka","quantity":10,"price":99.99}'
+```
+
+En **PowerShell**:
+
+```powershell
+$resp = Invoke-RestMethod -Method Post -Uri "http://localhost:8080/auth/login" `
+  -ContentType "application/json" -Body '{"username":"admin","password":"admin123"}'
+$headers = @{ Authorization = "Bearer $($resp.token)"; "Content-Type" = "application/json" }
+Invoke-RestMethod -Method Post -Uri "http://localhost:8080/api/inventory/products" `
+  -Headers $headers -Body '{"name":"Producto Demo Kafka","quantity":10,"price":99.99}'
+```
+
+**Qué esperar:** respuesta HTTP del inventario con el producto creado; en la terminal del **notification-service** logs del estilo `=== NOTIFICACIÓN RECIBIDA (Kafka) ===` con ID, nombre, cantidad y precio.
+
+### 4.3 Verificar el topic y los mensajes con CLI
+
+> **Nota sobre cómo invocar los scripts según tu instalación:**
+>
+> - **Instalación nativa (macOS/Linux/WSL):** `kafka-topics.sh`, `kafka-consumer-groups.sh`, etc., están en el `PATH` (Homebrew) o en `bin/` del binario descargado.
+> - **Instalación nativa (Windows):** los mismos comandos están en `bin\windows\` con extensión `.bat` (`kafka-topics.bat`, `kafka-consumer-groups.bat`, …). Subsección dedicada más abajo.
+> - **Docker:** prefijá cualquiera de los comandos `.sh` con `docker exec kafka …`. Por ejemplo: `docker exec kafka kafka-topics.sh --bootstrap-server localhost:9092 --list`.
+
+#### macOS / Linux / Git Bash / WSL
+
+```bash
+# Ver que el topic fue creado automáticamente
+kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+# Ver detalles del topic (particiones, factor de replicación)
+kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic product-created
+
+# Leer todos los mensajes publicados en el topic (útil para debug)
+kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic product-created \
+  --from-beginning
+
+# Estado del consumer group: offset commiteado, log-end-offset y LAG
+kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe --group notification-group
+
+# O desde Docker (mismo comando, prefijado por docker exec):
+docker exec kafka kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic product-created \
+  --from-beginning
+```
+
+#### Windows (PowerShell / CMD) — instalación nativa
+
+Si seguiste la sección 2.1 e instalaste Kafka en `C:\kafka`, los scripts están en `bin\windows\` con extensión `.bat`. Pará en esa carpeta o usá la ruta completa:
+
+```powershell
+cd C:\kafka
+
+# Ver que el topic fue creado automáticamente
+bin\windows\kafka-topics.bat --bootstrap-server localhost:9092 --list
+
+# Ver detalles del topic (particiones, factor de replicación)
+bin\windows\kafka-topics.bat --bootstrap-server localhost:9092 --describe --topic product-created
+
+# Leer todos los mensajes publicados en el topic (útil para debug)
+bin\windows\kafka-console-consumer.bat `
+  --bootstrap-server localhost:9092 `
+  --topic product-created `
+  --from-beginning
+
+# Estado del consumer group: offset commiteado, log-end-offset y LAG
+bin\windows\kafka-consumer-groups.bat `
+  --bootstrap-server localhost:9092 `
+  --describe --group notification-group
+```
+
+> En PowerShell el carácter de continuación de línea es **`** (backtick), no `\`. En CMD escribí cada comando en una sola línea.
+
+`kafka-console-consumer` imprime los mensajes en crudo (JSON en este caso). Para salir: `Ctrl+C`.
+
+`kafka-consumer-groups --describe` muestra una tabla con `CURRENT-OFFSET`, `LOG-END-OFFSET` y `LAG` por partición. Si después del POST de la sección 4.2 ves `LAG = 0`, el `notification-service` ya consumió y procesó el evento. Si `LAG > 0` y no baja, el consumidor está corriendo pero no llega a procesar (típico cuando rompe la deserialización: revisá su consola). El detalle conceptual de estas métricas y su relación con la carga está en la sección 5.
+
+---
+
+## 5. Qué observar en Kafka
+
+A diferencia de RabbitMQ (que elimina el mensaje al consumirlo), Kafka expone métricas de **lag** del consumer group:
+
+#### macOS / Linux / Git Bash / WSL
+
+```bash
+# Ver el offset actual del grupo notification-group
+kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe --group notification-group
+
+# O desde Docker:
+docker exec kafka kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 \
+  --describe --group notification-group
+```
+
+#### Windows (PowerShell / CMD) — instalación nativa
+
+```powershell
+cd C:\kafka
+
+bin\windows\kafka-consumer-groups.bat `
+  --bootstrap-server localhost:9092 `
+  --describe --group notification-group
+```
+
+La salida muestra por partición:
+
+| TOPIC           | PARTITION | CURRENT-OFFSET | LOG-END-OFFSET | LAG |
+|-----------------|-----------|---------------|----------------|-----|
+| product-created | 0         | 5             | 5              | 0   |
+
+- **CURRENT-OFFSET:** último mensaje procesado por el consumidor.
+- **LOG-END-OFFSET:** último mensaje publicado por el productor.
+- **LAG = LOG-END-OFFSET − CURRENT-OFFSET:** mensajes pendientes de consumir.
+
+Durante la carga con k6, si el **LAG crece de forma sostenida**, el consumidor no puede seguir el ritmo del productor. Contrastá eso con los errores y latencias reportados por k6 en el Gateway.
+
+---
+
+## 6. Carga con k6
+
+Creá un archivo (por ejemplo `k6-product-load-kafka.js`) en la raíz del repo o donde prefieras. El script es idéntico al de RabbitMQ porque ambos usan el mismo endpoint HTTP — la diferencia está en el broker interno:
+
+```javascript
+import http from "k6/http";
+import { check, sleep } from "k6";
+
+export const options = {
+  stages: [
+    { duration: "30s", target: 10 },
+    { duration: "1m", target: 50 },
+    { duration: "30s", target: 0 },
+  ],
+  thresholds: {
+    http_req_failed: ["rate<0.05"],
+    http_req_duration: ["p(95)<3000"],
+  },
+};
+
+export default function () {
+  const loginRes = http.post(
+    "http://localhost:8080/auth/login",
+    JSON.stringify({ username: "admin", password: "admin123" }),
+    { headers: { "Content-Type": "application/json" } }
+  );
+  const okLogin = check(loginRes, {
+    "login 200": (r) => r.status === 200,
+  });
+  if (!okLogin) return;
+
+  let token;
+  try {
+    token = loginRes.json("token");
+  } catch (e) {
+    return;
+  }
+
+  const payload = JSON.stringify({
+    name: `Load-${__VU}-${__ITER}`,
+    quantity: 1,
+    price: 10,
+  });
+
+  const createRes = http.post(
+    "http://localhost:8080/api/inventory/products",
+    payload,
+    {
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  check(createRes, {
+    "create 200": (r) => r.status === 200,
+  });
+
+  sleep(1);
+}
+```
+
+Ejecutá:
+
+```bash
+k6 run k6-product-load-kafka.js
+```
+
+Al terminar, k6 imprime **tasas de error**, **percentiles de duración** y **RPS**. Mientras corre, en otra terminal observá el lag del consumer group:
+
+**macOS / Linux / WSL (con `watch` instalado):**
+
+```bash
+watch -n 2 "kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group notification-group"
+```
+
+**Windows (PowerShell)** — equivalente sin `watch`, refresca cada 2 segundos:
+
+```powershell
+cd C:\kafka
+while ($true) {
+  Clear-Host
+  bin\windows\kafka-consumer-groups.bat `
+    --bootstrap-server localhost:9092 `
+    --describe --group notification-group
+  Start-Sleep -Seconds 2
+}
+```
+
+Para salir del loop: `Ctrl+C`.
+
+---
+
+## 7. Preguntas guía (para cerrar la práctica)
+
+- Si los HTTP codes están bien pero el LAG del consumer group crece, ¿dónde está el cuello de botella?
+- Si fallan muchos logins o creaciones, ¿es auth, gateway, inventario o base H2?
+- ¿Por qué en Kafka el consumidor puede volver a leer mensajes anteriores y en RabbitMQ no?
+- Cambiá el perfil de `kafka` a `rabbitmq` sin tocar el dominio. ¿Qué cambió en el código? ¿Por qué?
+
+---
+
+## 8. Resumen del orden
+
+| Orden | Servicio             | Puerto        | Notas                                        |
+|-------|----------------------|---------------|----------------------------------------------|
+| 0     | Kafka (KRaft)        | 9092          | Antes que inventory/notification             |
+| 1     | config-server        | 8888          | Perfil `native`                              |
+| 2     | eureka-server        | 8761          |                                              |
+| 3     | auth-service         | 8083          |                                              |
+| 4     | inventory-service    | 8082          | Perfil `kafka`                               |
+| 5     | notification-service | 8084          | Perfil `kafka`                               |
+| 6     | api-gateway          | 8080          | Después de registrados en Eureka             |
+
+Referencias cruzadas: arranque general en **`comoejecutardeformamanual.md`** y variante Docker/README en **`README.md`**.
