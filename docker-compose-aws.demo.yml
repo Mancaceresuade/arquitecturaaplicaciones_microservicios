@@ -8,12 +8,17 @@ services:
       - "8888:8888"
     environment:
       SPRING_PROFILES_ACTIVE: native
+      JAVA_OPTS: "-Xms64m -Xmx128m"
+    deploy:
+      resources:
+        limits:
+          memory: 200m
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "-O", "/dev/null", "http://localhost:8888/actuator/health"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 40s
+      start_period: 60s
 
   eureka-server:
     build:
@@ -23,6 +28,11 @@ services:
       - "8761:8761"
     environment:
       EUREKA_INSTANCE_HOSTNAME: eureka-server
+      JAVA_OPTS: "-Xms64m -Xmx128m"
+    deploy:
+      resources:
+        limits:
+          memory: 200m
     depends_on:
       config-server:
         condition: service_healthy
@@ -31,7 +41,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 40s
+      start_period: 60s
 
   auth-service:
     build:
@@ -42,6 +52,11 @@ services:
     environment:
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      JAVA_OPTS: "-Xms64m -Xmx150m"
+    deploy:
+      resources:
+        limits:
+          memory: 220m
     depends_on:
       config-server:
         condition: service_healthy
@@ -57,6 +72,11 @@ services:
     environment:
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      JAVA_OPTS: "-Xms64m -Xmx150m"
+    deploy:
+      resources:
+        limits:
+          memory: 220m
     depends_on:
       config-server:
         condition: service_healthy
@@ -72,6 +92,11 @@ services:
     environment:
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
       EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+      JAVA_OPTS: "-Xms64m -Xmx150m"
+    deploy:
+      resources:
+        limits:
+          memory: 220m
     depends_on:
       config-server:
         condition: service_healthy
