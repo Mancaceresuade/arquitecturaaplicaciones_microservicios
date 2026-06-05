@@ -1,0 +1,17 @@
+### Login AWS
+@authUrl = http://34.171.100.85:8083
+
+### Login GCP
+#@authUrl = http://34.171.100.85:8083
+
+
+### Login Azure - admin
+# @authUrl = http://20.94.63.10:8083
+
+POST {{authUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "admin123"
+}
