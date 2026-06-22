@@ -11,9 +11,9 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>exam-cliente-integration-tests</artifactId>
-    <name>Exam Cliente Integration Tests</name>
-    <description>Tests de integración HTTP vía gateway + verificación RabbitMQ para el parcial cliente-service</description>
+    <artifactId>exam-proveedor-integration-tests</artifactId>
+    <name>Exam Proveedor Integration Tests</name>
+    <description>Tests de integración HTTP vía gateway + verificación Kafka para el parcial proveedor-service</description>
     <packaging>jar</packaging>
 
     <dependencies>
@@ -33,8 +33,8 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.rabbitmq</groupId>
-            <artifactId>amqp-client</artifactId>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
