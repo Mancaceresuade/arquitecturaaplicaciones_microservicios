@@ -1,14 +1,14 @@
-# Parcial 2 — Tema 1
+# Parcial 2 — Tema 2
 ### Arquitectura de Aplicaciones · UADE · Clases 8–14
 
-**Parte práctica: implementar `proveedor-service` con Apache Kafka**
+**Parte práctica: implementar `cliente-service` con RabbitMQ**
 
 > El agente de IA (Cursor, Claude Code, Copilot, etc.) **está permitido y es parte del examen**.
 > Lo que se evalúa es si podés dirigirlo correctamente y entender lo que produce.
 
 ---
 
-## Parte 1 — Práctica: implementar `proveedor-service`
+## Parte 1 — Práctica: implementar `cliente-service`
 
 ### Contexto
 
@@ -20,58 +20,58 @@ El ecosistema base ya tiene corriendo:
 | `config-server` | 8888 |
 | `auth-service` | 8083 |
 | `api-gateway` | 8080 |
-| Kafka Broker | 9092 |
-| Zookeeper / KRaft | 2181 |
+| RabbitMQ Broker | 5672 (AMQP) / 15672 (UI) |
 
-Tu tarea es implementar el módulo **`proveedor-service`** dentro del proyecto que ya tenés clonado.
+Tu tarea es implementar el módulo **`cliente-service`** dentro del proyecto que ya tenés clonado.
 
 ### Qué tenés que construir
 
 Un microservicio Spring Boot 3 / Java 21 que:
 
-1. Se registra en Eureka con `spring.application.name=proveedor-service` en el puerto **8086**.
-2. Expone bajo `/api/proveedores/**` las rutas protegidas con JWT (HS384, mismo secret del ecosistema).
-3. Persiste en **H2 en memoria**. El modelo `Proveedor` tiene:
+1. Se registra en Eureka con `spring.application.name=cliente-service` en el puerto **8085**.
+2. Expone bajo `/api/clientes/**` las rutas protegidas con JWT (HS384, mismo secret del ecosistema).
+3. Persiste en **H2 en memoria**. El modelo `Cliente` tiene:
    - `id` → Long, generado por H2 (solo lectura; si llega en el body de un POST se ignora)
    - `nombre` → String, obligatorio, no vacío, máx. 200 caracteres
    - `telefono` → String, obligatorio, no vacío, máx. 30 caracteres
 
-4. Implementa el flujo Kafka **como publicador** sobre el topic `proveedor.events`:
-   - **POST /api/proveedores** → persiste → publica con `key=proveedor.created`
-   - **PUT /api/proveedores/{id}** → actualiza → publica con `key=proveedor.updated`
-   - **DELETE /api/proveedores/{id}** → borra → publica con `key=proveedor.deleted`
+4. Implementa el flujo RabbitMQ **como publicador** sobre el exchange `cliente.exchange` (tipo **topic**):
+   - **POST /api/clientes** → persiste → publica con routing key `cliente.created`
+   - **PUT /api/clientes/{id}** → actualiza → publica con routing key `cliente.updated`
+   - **DELETE /api/clientes/{id}** → borra → publica con routing key `cliente.deleted`
 
    No se exige implementar un consumidor: alcanza con publicar después de confirmar la persistencia.
 
-5. El `api-gateway` ya tiene configurada la ruta `Path=/api/proveedores/**` → `lb://proveedor-service`.
+5. El `api-gateway` debe enrutar `Path=/api/clientes/**` → `lb://cliente-service`.
 
 ### Contrato HTTP
 
 ```
-POST   /api/proveedores        → 201 Created + {id, nombre, telefono}
-GET    /api/proveedores        → 200 + array (puede ser [])
-GET    /api/proveedores/{id}   → 200 o 404
-PUT    /api/proveedores/{id}   → 200 o 404
-DELETE /api/proveedores/{id}   → 204 o 404
+POST   /api/clientes        → 201 Created + {id, nombre, telefono}
+GET    /api/clientes        → 200 + array (puede ser [])
+GET    /api/clientes/{id}   → 200 o 404
+PUT    /api/clientes/{id}   → 200 o 404
+DELETE /api/clientes/{id}   → 204 o 404
 ```
 Validación fallida → **400**. Sin JWT → **401**.
 
-### Contrato Kafka (cumplimiento estricto)
+### Contrato RabbitMQ (cumplimiento estricto)
 
 | Elemento | Valor obligatorio |
 |----------|-------------------|
-| Topic | `proveedor.events` |
-| Key (POST) | `proveedor.created` |
-| Key (PUT) | `proveedor.updated` |
-| Key (DELETE) | `proveedor.deleted` |
-| Value | JSON UTF-8 |
+| Exchange | `cliente.exchange` |
+| Tipo de exchange | **topic** |
+| Routing key (POST) | `cliente.created` |
+| Routing key (PUT) | `cliente.updated` |
+| Routing key (DELETE) | `cliente.deleted` |
+| Content-Type | `application/json` (UTF-8) |
 
-El **value** de cada mensaje es un objeto JSON con al menos:
+El **cuerpo** de cada mensaje es un objeto JSON con al menos:
 
 | Campo | Tipo | Reglas |
 |-------|------|--------|
-| `eventType` | string | `PROVEEDOR_CREATED`, `PROVEEDOR_UPDATED` o `PROVEEDOR_DELETED` según la operación |
-| `proveedorId` | number | `id` del proveedor afectado (Long) |
+| `eventType` | string | `CLIENTE_CREATED`, `CLIENTE_UPDATED` o `CLIENTE_DELETED` según la operación |
+| `clienteId` | number | `id` del cliente afectado (Long) |
 | `nombre` | string | Valor del nombre tras la operación (en `DELETED`, el último valor conocido) |
 | `telefono` | string | Mismo criterio que `nombre` |
 | `occurredAt` | string | Instante en ISO-8601 (por ejemplo con offset `Z`) |
@@ -86,11 +86,11 @@ set EXAM_STUDENT_ID=12345           # Windows CMD
 # export EXAM_STUDENT_ID=12345      # Git Bash / Linux
 
 # Correr los tests de integración
-mvn -pl exam-proveedor-integration-tests verify
+mvn -pl exam-cliente-integration-tests verify
 ```
 
 **Aprobás esta parte si todos los tests quedan en verde.**
-El reporte queda en `exam-proveedor-integration-tests/target/exam-report/resultado-examen.json`.
+El reporte queda en `exam-cliente-integration-tests/target/exam-report/resultado-examen.json`.
 
 > El reporte incluye tu **legajo** (`examStudentId`, tomado de `EXAM_STUDENT_ID`) y un
 > **indicador de la máquina** (`examMachineId` = hostname, y `machineFingerprint` = hash
@@ -99,15 +99,15 @@ El reporte queda en `exam-proveedor-integration-tests/target/exam-report/resulta
 > antes de correr el `verify`.
 
 > Los tests validan el CRUD **solo a través del `api-gateway`** (puerto 8080) y, además,
-> abren un **consumidor Kafka real** sobre `proveedor.events` para comprobar que cada
-> operación de escritura publicó el mensaje con el topic, la key y el JSON esperados.
+> declaran una **cola temporal bindeada a `cliente.exchange`** para comprobar que cada
+> operación de escritura publicó el mensaje con el exchange, la routing key y el JSON esperados.
 
 ---
 
 ## Contexto del ecosistema (para resolver con cualquier IA)
 
 Si vas a dirigir a un agente de IA, dale esta información además del enunciado. Son los
-valores reales del proyecto que el `proveedor-service` debe respetar para integrarse.
+valores reales del proyecto que el `cliente-service` debe respetar para integrarse.
 
 ### Seguridad JWT
 
@@ -123,26 +123,32 @@ jwt:
 - Credenciales de prueba precargadas en `auth-service`: usuario `admin`, contraseña `admin123`.
 - El login se hace contra el gateway: `POST http://localhost:8080/auth/login`.
 
-### Ruta ya configurada en el `api-gateway`
+### Ruta a configurar en el `api-gateway`
+
+A diferencia de otros servicios, esta ruta **hay que agregarla** (no viene puesta):
 
 ```yaml
-- id: proveedor-service
-  uri: lb://proveedor-service
+- id: cliente-service
+  uri: lb://cliente-service
   predicates:
-    - Path=/api/proveedores/**
+    - Path=/api/clientes/**
   filters:
     - AuthorizationHeader
 ```
 
-### Configuración de Kafka (patrón de `inventory-service`)
+### Configuración de RabbitMQ (patrón de `inventory-service`, perfil `rabbitmq`)
 
-- Bootstrap servers: `localhost:9092` (perfil `kafka`).
-- Productor: `StringSerializer` para la key, `JsonSerializer` para el value.
+- Host `localhost`, puerto `5672`, usuario/contraseña `guest`/`guest`.
+- Exchange `cliente.exchange` declarado como **topic** (`TopicExchange`).
+- Conversor `Jackson2JsonMessageConverter` para serializar el evento a JSON.
 
 ```yaml
 spring:
-  kafka:
-    bootstrap-servers: localhost:9092
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
 ```
 
 ### Registro en Eureka
@@ -158,12 +164,13 @@ eureka:
 
 ### Sugerencia de prompt para el agente de IA
 
-> *"Implementá el módulo `proveedor-service` en Spring Boot 3 / Java 21 para este proyecto Maven.
-> Debe registrarse en Eureka (puerto 8086), exponer `/api/proveedores` protegido con JWT HS384
-> (mismo secret y patrón que `inventory-service`), persistir un `Proveedor {id, nombre, telefono}`
-> en H2, y publicar en el topic Kafka `proveedor.events` con keys `proveedor.created/updated/deleted`
-> y un value JSON con `eventType`, `proveedorId`, `nombre`, `telefono`, `occurredAt`.
-> La spec completa está en `parcial2_tema1_enunciado.md`."*
+> *"Implementá el módulo `cliente-service` en Spring Boot 3 / Java 21 para este proyecto Maven.
+> Debe registrarse en Eureka (puerto 8085), exponer `/api/clientes` protegido con JWT HS384
+> (mismo secret y patrón que `inventory-service`), persistir un `Cliente {id, nombre, telefono}`
+> en H2, y publicar en el exchange topic RabbitMQ `cliente.exchange` con routing keys
+> `cliente.created/updated/deleted` y un cuerpo JSON con `eventType`, `clienteId`, `nombre`,
+> `telefono`, `occurredAt`. Agregá también la ruta `/api/clientes/**` en el api-gateway.
+> La spec completa está en `parcial2_tema2_enunciado.md`."*
 
 > **Tip:** cuando el agente genere código, leélo. Si algo no compila o el test falla,
 > explicale el error. Ese intercambio es parte de lo que el docente observa.
